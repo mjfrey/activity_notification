@@ -46,18 +46,16 @@ describe ActivityNotification::Notification, type: :model do
   end
 
   describe "with serializable column" do
-    if ActivityNotification.config.orm == :active_record
-      it "has parameters for hash with symbol" do
-        parameters = {a: 1, b: 2, c: 3}
-        notification = create(:notification, parameters: parameters)
-        expect(notification.reload.parameters).to eq(parameters)
-      end
+    it "has parameters for hash with symbol" do
+      parameters = {a: 1, b: 2, c: 3}
+      notification = create(:notification, parameters: parameters)
+      expect(notification.reload.parameters.symbolize_keys).to eq(parameters)
     end
 
     it "has parameters for hash with string" do
       parameters = {'a' => 1, 'b' => 2, 'c' => 3}
       notification = create(:notification, parameters: parameters)
-      expect(notification.reload.parameters).to eq(parameters)
+      expect(notification.reload.parameters.stringify_keys).to eq(parameters)
     end
   end
 
@@ -280,15 +278,21 @@ describe ActivityNotification::Notification, type: :model do
 
         context 'with custom_filter options' do
           it "works with filtered_by_options scope" do
-            if ActivityNotification.config.orm == :active_record
-              notifications = ActivityNotification::Notification.filtered_by_options({ custom_filter: ["notifications.key = ?", @key_1] })
-              expect(notifications.to_a.size).to eq(1)
-              expect(notifications.first).to eq(@notification_1)
-            end
-
             notifications = ActivityNotification::Notification.filtered_by_options({ custom_filter: { key: @key_2 } })
             expect(notifications.to_a.size).to eq(1)
             expect(notifications.first).to eq(@notification_2)
+          end
+
+          it "works with filtered_by_options scope with filter depending on ORM" do
+            options =
+              case ActivityNotification.config.orm
+              when :active_record then { custom_filter: ["notifications.key = ?", @key_1] }
+              when :mongoid       then { custom_filter: { key: {'$eq': @key_1} } }
+              when :dynamoid      then { custom_filter: {'key.begins_with': @key_1} }
+              end
+            notifications = ActivityNotification::Notification.filtered_by_options(options)
+            expect(notifications.to_a.size).to eq(1)
+            expect(notifications.first).to eq(@notification_1)
           end
         end
   
@@ -304,35 +308,101 @@ describe ActivityNotification::Notification, type: :model do
     context "to make order by created_at" do
       before do
         ActivityNotification::Notification.delete_all
-        unopened_group_owner   = create(:notification, group_owner: nil)
-        unopened_group_member  = create(:notification, group_owner: unopened_group_owner, created_at: unopened_group_owner.created_at + 10.second)
-        opened_group_owner     = create(:notification, group_owner: nil, opened_at: Time.current, created_at: unopened_group_owner.created_at + 20.second)
-        opened_group_member    = create(:notification, group_owner: opened_group_owner, opened_at: Time.current, created_at: unopened_group_owner.created_at + 30.second)
+        @target = create(:confirmed_user)
+        unopened_group_owner   = create(:notification, target: @target, group_owner: nil)
+        unopened_group_member  = create(:notification, target: @target, group_owner: unopened_group_owner, created_at: unopened_group_owner.created_at + 10.second)
+        opened_group_owner     = create(:notification, target: @target, group_owner: nil, opened_at: Time.current, created_at: unopened_group_owner.created_at + 20.second)
+        opened_group_member    = create(:notification, target: @target, group_owner: opened_group_owner, opened_at: Time.current, created_at: unopened_group_owner.created_at + 30.second)
         @earliest_notification = unopened_group_owner
         @latest_notification   = opened_group_member
       end
 
-      it "works with latest_order scope" do
-        notifications = ActivityNotification::Notification.latest_order
+      unless ActivityNotification.config.orm == :dynamoid
+        context "using ORM other than dynamoid, you can directly call latest/earliest order method from class objects" do
+
+          it "works with latest_order scope" do
+            notifications = ActivityNotification::Notification.latest_order
+            expect(notifications.to_a.size).to eq(4)
+            expect(notifications.first).to eq(@latest_notification)
+            expect(notifications.last).to eq(@earliest_notification)
+          end
+
+          it "works with earliest_order scope" do
+            notifications = ActivityNotification::Notification.earliest_order
+            expect(notifications.to_a.size).to eq(4)
+            expect(notifications.first).to eq(@earliest_notification)
+            expect(notifications.last).to eq(@latest_notification)
+          end
+
+          it "returns the latest notification with latest scope" do
+            notification = ActivityNotification::Notification.latest
+            expect(notification).to eq(@latest_notification)
+          end
+
+          it "returns the earliest notification with earliest scope" do
+            notification = ActivityNotification::Notification.earliest
+            expect(notification).to eq(@earliest_notification)
+          end
+
+        end
+      else
+        context "using dynamoid, you can call latest/earliest order method only with query using partition key of Global Secondary Index" do
+
+          it "works with latest_order scope" do
+            notifications = ActivityNotification::Notification.filtered_by_target(@target).latest_order
+            expect(notifications.to_a.size).to eq(4)
+            expect(notifications.first).to eq(@latest_notification)
+            expect(notifications.last).to eq(@earliest_notification)
+          end
+
+          it "works with earliest_order scope" do
+            notifications = ActivityNotification::Notification.filtered_by_target(@target).earliest_order
+            expect(notifications.to_a.size).to eq(4)
+            expect(notifications.first).to eq(@earliest_notification)
+            expect(notifications.last).to eq(@latest_notification)
+          end
+
+          it "returns the latest notification with latest scope" do
+            notification = ActivityNotification::Notification.filtered_by_target(@target).latest
+            expect(notification).to eq(@latest_notification)
+          end
+
+          it "returns the earliest notification with earliest scope" do
+            notification = ActivityNotification::Notification.filtered_by_target(@target).earliest
+            expect(notification).to eq(@earliest_notification)
+          end
+
+        end
+      end
+
+      it "works with latest_order! scope" do
+        notifications = ActivityNotification::Notification.latest_order!
         expect(notifications.to_a.size).to eq(4)
         expect(notifications.first).to eq(@latest_notification)
         expect(notifications.last).to eq(@earliest_notification)
       end
 
-      it "works with earliest_order scope" do
-        notifications = ActivityNotification::Notification.earliest_order
+      it "works with latest_order!(reverse=true) scope" do
+        notifications = ActivityNotification::Notification.latest_order!(true)
         expect(notifications.to_a.size).to eq(4)
         expect(notifications.first).to eq(@earliest_notification)
         expect(notifications.last).to eq(@latest_notification)
       end
 
-      it "returns the latest notification with latest scope" do
-        notification = ActivityNotification::Notification.latest
+      it "works with earliest_order! scope" do
+        notifications = ActivityNotification::Notification.earliest_order!
+        expect(notifications.to_a.size).to eq(4)
+        expect(notifications.first).to eq(@earliest_notification)
+        expect(notifications.last).to eq(@latest_notification)
+      end
+
+      it "returns the latest notification with latest! scope" do
+        notification = ActivityNotification::Notification.latest!
         expect(notification).to eq(@latest_notification)
       end
 
-      it "returns the earliest notification with earliest scope" do
-        notification = ActivityNotification::Notification.earliest
+      it "returns the earliest notification with earliest! scope" do
+        notification = ActivityNotification::Notification.earliest!
         expect(notification).to eq(@earliest_notification)
       end
     end
